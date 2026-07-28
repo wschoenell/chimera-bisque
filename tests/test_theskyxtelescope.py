@@ -250,3 +250,29 @@ def test_sync_precesses_j2000_target(telescope, skyx_server):
     script = _last_script_with(skyx_server, "Sync")
     assert "sky6Utils.Precess2000ToNow(12.0, -30.0)" in script
     assert "Sync(sky6Utils.dOut0, sky6Utils.dOut1" in script
+
+
+def test_get_site_shim_works_on_cores_from_both_sides_of_271():
+    """astroufsc/chimera#271 replaced TelescopeBase.site() with the
+    manager-injected ChimeraObject.get_site(). Deploying that core broke
+    every alt/az conversion on opd-40 (2026-07-28: `AttributeError:
+    'TheSkyXTelescope' object has no attribute 'site'` out of get_az, which
+    the dome lookup calls). The driver must run on either core."""
+    from chimera_bisque.instruments.theskyxtelescope import TheSkyXTelescope
+
+    class NewCore(TheSkyXTelescope):
+        def __init__(self):
+            pass
+
+        def get_site(self):
+            return "injected-site"
+
+    class OldCore(TheSkyXTelescope):
+        def __init__(self):
+            pass
+
+        def site(self):
+            return "proxy-site"
+
+    assert TheSkyXTelescope._get_site(NewCore()) == "injected-site"
+    assert TheSkyXTelescope._get_site(OldCore()) == "proxy-site"

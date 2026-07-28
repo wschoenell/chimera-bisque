@@ -116,6 +116,18 @@ class TheSkyXTelescope(TelescopeBase):
             self.slew_complete(ra, dec, TelescopeStatus.ERROR)
             raise RuntimeError(f"Slew failed: {e}")
 
+    def _get_site(self):
+        """The site object, whichever accessor this core provides.
+
+        astroufsc/chimera#271 replaced ``TelescopeBase.site()`` with the
+        manager-injected ``ChimeraObject.get_site()``. Support both so the
+        driver runs on cores from either side of that change.
+        """
+        get_site = getattr(self, "get_site", None)
+        if get_site is not None:
+            return get_site()
+        return self.site()
+
     @lock
     def slew_to_alt_az(self, alt: float, az: float) -> None:
         """Slew telescope to target Alt/Az coordinates.
@@ -132,7 +144,7 @@ class TheSkyXTelescope(TelescopeBase):
         """
         self._validate_alt_az(alt, az)
 
-        site = self.site()
+        site = self._get_site()
         ra, dec = site.alt_az_to_ra_dec(alt, az)
 
         self.slew_to_ra_dec(ra, dec)
@@ -187,7 +199,7 @@ class TheSkyXTelescope(TelescopeBase):
             (alt_degrees, az_degrees): Current altitude and azimuth
         """
         ra, dec = self.get_position_ra_dec()
-        site = self.site()
+        site = self._get_site()
         alt, az = site.ra_dec_to_alt_az(ra, dec)
         return alt, az
 

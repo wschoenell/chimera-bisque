@@ -87,6 +87,15 @@ class TheSkyTelescope(TelescopeBase):
         return True
 
     def _get_site(self):
+        """The site object, whichever accessor this core provides.
+
+        astroufsc/chimera#271 replaced ``TelescopeBase.site()`` with the
+        manager-injected ``ChimeraObject.get_site()``. Support both so the
+        driver runs on cores from either side of that change.
+        """
+        get_site = getattr(self, "get_site", None)
+        if get_site is not None:
+            return get_site()
         return self.site()
 
     @com

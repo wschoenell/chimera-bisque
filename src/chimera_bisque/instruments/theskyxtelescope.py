@@ -111,7 +111,11 @@ class TheSkyXTelescope(TelescopeBase):
                     self.slew_complete(ra, dec, TelescopeStatus.OK)
                     return
 
-                time.sleep(poll_interval_sec)
+                # Block on the abort event instead of time.sleep(): an
+                # abort_slew() breaks the poll at once rather than after a
+                # whole tick (astroufsc/chimera#255 applies the same idiom to
+                # the scheduler's pre-slew wait).
+                self._abort.wait(poll_interval_sec)
 
         except TheSkyXCommandError as e:
             self.slew_complete(ra, dec, TelescopeStatus.ERROR)
@@ -350,7 +354,9 @@ class TheSkyXTelescope(TelescopeBase):
 
             start_time = time.time()
             while self._driver.is_slewing():
-                if self._abort.is_set():
+                # Wait on the abort event rather than sleeping through the
+                # tick, so abort_slew() releases the poll immediately.
+                if self._abort.wait(poll_interval_sec):
                     self._driver.abort_slew()
                     self.log.warning("Homing aborted")
                     return
@@ -360,8 +366,6 @@ class TheSkyXTelescope(TelescopeBase):
                     raise RuntimeError(
                         f"Homing timeout: took longer than {max_find_home_time_sec}s"
                     )
-
-                time.sleep(poll_interval_sec)
 
         except TheSkyXCommandError as e:
             raise RuntimeError(f"Failed to home telescope: {e}")

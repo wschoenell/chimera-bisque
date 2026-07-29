@@ -163,7 +163,11 @@ class TheSkyXDriver:
             self.log.error(f"Error disconnecting from TheSkyX: {e}")
 
     def get_ra_dec(self) -> tuple[float, float]:
-        """Get current telescope RA and Dec"""
+        """Get the telescope RA/Dec as TheSkyX reports it: epoch of date.
+
+        RA in hours, Dec in degrees. Use :meth:`get_ra_dec_j2000` for anything
+        that will be written to a header or handed back to chimera.
+        """
         if not self._is_connected:
             raise TheSkyXConnectionError("Not connected to TheSkyX")
 
@@ -173,24 +177,82 @@ class TheSkyXDriver:
                 sky6RASCOMTele.GetRaDec();
                 Out = String(sky6RASCOMTele.dRa) + " " + String(sky6RASCOMTele.dDec);
             """
-            result = self._send_command(command)
-            parts = result.split()
-
-            if len(parts) < 2:
-                raise TheSkyXCommandError(f"Invalid RA/Dec response: {result}")
-
-            ra_hours = float(parts[0])
-            dec_degrees = float(parts[1])
-
-            # No per-call debug line here: get_ra_dec is polled and the wire
-            # log in _send_once already carries the result.
-            return ra_hours, dec_degrees
+            return self._parse_ra_dec(self._send_command(command))
 
         except (ValueError, TheSkyXConnectionError) as e:
             raise TheSkyXCommandError(f"Failed to get RA/Dec: {e}")
 
+    def get_ra_dec_j2000(self) -> tuple[float, float]:
+        """Get the telescope RA/Dec precessed back to J2000.
+
+        The precession runs inside the same script as the read, so a polled
+        position still costs one round trip.
+        """
+        if not self._is_connected:
+            raise TheSkyXConnectionError("Not connected to TheSkyX")
+
+        try:
+            command = """
+                var Out;
+                sky6RASCOMTele.GetRaDec();
+                sky6Utils.PrecessNowTo2000(sky6RASCOMTele.dRa, sky6RASCOMTele.dDec);
+                Out = String(sky6Utils.dOut0) + " " + String(sky6Utils.dOut1);
+            """
+            return self._parse_ra_dec(self._send_command(command))
+
+        except (ValueError, TheSkyXConnectionError) as e:
+            raise TheSkyXCommandError(f"Failed to get J2000 RA/Dec: {e}")
+
+    @staticmethod
+    def _parse_ra_dec(result: str) -> tuple[float, float]:
+        parts = result.split()
+        if len(parts) < 2:
+            raise TheSkyXCommandError(f"Invalid RA/Dec response: {result}")
+        # No per-call debug line here: this path is polled and the wire log in
+        # _send_once already carries the result.
+        return float(parts[0]), float(parts[1])
+
+    def slew_to_ra_dec_j2000(self, ra_hours: float, dec_degrees: float) -> None:
+        """Slew to J2000 coordinates, precessed by TheSkyX to the epoch of date.
+
+        ``SlewToRaDec`` takes coordinates "for the current epoch" (Bisque
+        scripting docs); feeding it J2000 put every target 10-30' off, and
+        whole RUP147 runs off the QHY600 field entirely (lna40 PENDING_ISSUES
+        #51). It went unnoticed because the readback carried the same error
+        with the opposite sign, so the headers reproduced the catalog position
+        while the mount was 20' away.
+
+        The precession is done by TheSkyX itself, in the same script as the
+        slew: it is the transform the mount is aligned to, and pyephem's
+        precession-only conversion differs from it by 8-20" (measured against
+        opd-40's TheSkyX 2026-07-29 -- it carries no nutation or aberration).
+        """
+        if not self._is_connected:
+            raise TheSkyXConnectionError("Not connected to TheSkyX")
+
+        try:
+            command = f"""
+                var Out;
+                sky6Utils.Precess2000ToNow({ra_hours}, {dec_degrees});
+                var raNow = sky6Utils.dOut0;
+                var decNow = sky6Utils.dOut1;
+                sky6RASCOMTele.RightAscension = raNow;
+                sky6RASCOMTele.Declination = decNow;
+                sky6RASCOMTele.SlewToRaDec(raNow, decNow, "Chimera");
+                Out = "undefined";
+            """
+            self._send_command(command)
+            self._is_slewing = True
+            self.log.info(f"Slewing to RA={ra_hours}h, Dec={dec_degrees}° (J2000)")
+
+        except TheSkyXConnectionError:
+            raise
+        except Exception as e:
+            self._is_slewing = False
+            raise TheSkyXCommandError(f"Failed to slew to J2000 RA/Dec: {e}")
+
     def slew_to_ra_dec(self, ra_hours: float, dec_degrees: float) -> None:
-        """Slew telescope to target RA/Dec.
+        """Slew telescope to RA/Dec in the epoch of date, as TheSkyX wants it.
 
         This command initiates an asynchronous slew. Use is_slewing() to poll.
 
@@ -268,8 +330,32 @@ class TheSkyXDriver:
         except Exception as e:
             raise TheSkyXCommandError(f"Failed to abort slew: {e}")
 
+    def sync_ra_dec_j2000(self, ra_hours: float, dec_degrees: float) -> None:
+        """Sync the mount to a J2000 position, precessed to the epoch of date.
+
+        ``Sync`` writes the mount model, so an un-precessed sync would bake the
+        20' epoch error into it permanently.
+        """
+        if not self._is_connected:
+            raise TheSkyXConnectionError("Not connected to TheSkyX")
+
+        try:
+            command = f"""
+                var Out;
+                sky6Utils.Precess2000ToNow({ra_hours}, {dec_degrees});
+                sky6RASCOMTele.Sync(sky6Utils.dOut0, sky6Utils.dOut1, "Chimera");
+                Out = "undefined";
+            """
+            self._send_command(command)
+            self.log.info(f"Synced to RA={ra_hours}h, Dec={dec_degrees}° (J2000)")
+
+        except TheSkyXConnectionError:
+            raise
+        except Exception as e:
+            raise TheSkyXCommandError(f"Failed to sync J2000 RA/Dec: {e}")
+
     def sync_ra_dec(self, ra_hours: float, dec_degrees: float) -> None:
-        """Sync telescope to current position (calibration)"""
+        """Sync telescope to a position in the epoch of date (calibration)"""
         if not self._is_connected:
             raise TheSkyXConnectionError("Not connected to TheSkyX")
 

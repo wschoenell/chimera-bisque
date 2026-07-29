@@ -137,3 +137,31 @@ def test_stop_tracking_reflected_by_is_tracking(telescope, skyx_server):
     assert telescope.is_tracking() is True
     telescope.stop_tracking()
     assert telescope.is_tracking() is False
+
+
+def test_unpark_homes_the_mount(telescope, skyx_server):
+    # A Paramount coming out of park has no valid pointing reference until it
+    # has found home, so waking it up must include the homing run.
+    telescope.unpark()
+    assert any("FindHome" in script for script in skyx_server.scripts)
+
+
+def test_unpark_can_skip_homing(manager, skyx_server):
+    host, port = skyx_server.server_address
+    telescope = manager.add_class(
+        TheSkyXTelescope,
+        "skyx-nohome",
+        config={
+            "skyx_host": host,
+            "skyx_port": port,
+            "poll_interval_sec": 0.01,
+            "find_home_on_unpark": False,
+        },
+    )
+    telescope.unpark()
+    assert not any("FindHome" in script for script in skyx_server.scripts)
+
+
+def test_find_home_can_be_called_directly(telescope, skyx_server):
+    telescope.find_home()
+    assert any("FindHome" in script for script in skyx_server.scripts)

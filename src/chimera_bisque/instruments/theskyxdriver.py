@@ -37,7 +37,7 @@ class TheSkyXDriver:
         self._is_parked = False
         self._is_slewing = False
 
-    def _send_command(self, javascript: str) -> str:
+    def _send_command(self, javascript: str, timeout: float | None = None) -> str:
         #  The try/catch is essential: an *uncaught* script exception (e.g.
         #  "TypeError: Process aborted. Error = 212." from IsSlewComplete right
         #  after Abort()) drops TheSkyX into its interactive Qt Script debugger,
@@ -60,7 +60,7 @@ class TheSkyXDriver:
         # running"; keep retrying (bounded) until the engine frees up.
         deadline = time.monotonic() + self._busy_timeout
         while True:
-            result = self._send_once(command)
+            result = self._send_once(command, timeout=timeout)
             if self._is_busy(result) and time.monotonic() < deadline:
                 self.log.debug("TheSkyX busy, retrying...")
                 time.sleep(self._busy_retry_delay)
@@ -77,12 +77,15 @@ class TheSkyXDriver:
         low = result.lower()
         return result == "NG" or "another script is running" in low
 
-    def _send_once(self, command: str) -> str:
+    def _send_once(self, command: str, timeout: float | None = None) -> str:
+        # Per-command override for the few scripts (homing) that legitimately
+        # take longer to answer than the default round-trip timeout.
+        timeout = self.timeout if timeout is None else timeout
         try:
             with socket(AF_INET, SOCK_STREAM) as sock:
                 # A timeout is essential: without it an unresponsive or
                 # restarted TheSkyX would make recv() block forever.
-                sock.settimeout(self.timeout)
+                sock.settimeout(timeout)
                 sock.connect((self.host, self.port))
                 sock.sendall(command.encode("utf-8"))
                 response = sock.recv(2048).decode("utf-8", errors="ignore")
@@ -95,7 +98,7 @@ class TheSkyXDriver:
         except TimeoutError as e:
             raise TheSkyXConnectionError(
                 f"Timed out talking to TheSkyX at {self.host}:{self.port} "
-                f"after {self.timeout}s: {e}"
+                f"after {timeout}s: {e}"
             )
         except OSError as e:
             raise TheSkyXConnectionError(
@@ -413,3 +416,32 @@ class TheSkyXDriver:
     def is_parked(self) -> bool:
         """Check if telescope is parked"""
         return self._is_parked
+
+    def find_home(self, timeout: float | None = None) -> None:
+        """Send the mount to its mechanical home position.
+
+        Behaves like a slew: with Asynchronous = 1 the script normally returns
+        at once and completion is polled with :meth:`is_slewing`. Some mount
+        drivers block the script for the whole homing run anyway, hence the
+        ``timeout`` override -- the default 15 s round-trip timeout would abort
+        a homing that is still perfectly healthy.
+        """
+        if not self._is_connected:
+            raise TheSkyXConnectionError("Not connected to TheSkyX")
+
+        try:
+            # https://www.bisque.com/wp-content/scriptthesky/classsky6_r_a_s_c_o_m_tele.html
+            command = """
+                var Out;
+                sky6RASCOMTele.FindHome();
+                Out = "undefined";
+            """
+            self._send_command(command, timeout=timeout)
+            self._is_slewing = True
+            self.log.info("Finding home")
+
+        except TheSkyXConnectionError:
+            raise
+        except Exception as e:
+            self._is_slewing = False
+            raise TheSkyXCommandError(f"Failed to find home: {e}")

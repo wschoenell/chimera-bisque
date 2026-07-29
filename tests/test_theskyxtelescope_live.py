@@ -216,5 +216,13 @@ def test_park_and_unpark(telescope):
     telescope.park()
     _wait_not_slewing(telescope)
     assert telescope.is_parked() is True
+    # unpark() homes the mount before returning (find_home_on_unpark).
     telescope.unpark()
     assert telescope.is_parked() is False
+    assert telescope.is_slewing() is False
+
+
+@destructive
+def test_find_home(telescope):
+    telescope.find_home()
+    assert telescope.is_slewing() is False

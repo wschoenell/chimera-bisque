@@ -112,6 +112,17 @@ def test_park_unpark(driver):
     assert driver.is_parked() is False
 
 
+def test_find_home_requires_connection(driver):
+    with pytest.raises(TheSkyXConnectionError):
+        driver.find_home()
+
+
+def test_find_home_marks_the_mount_as_moving(driver):
+    driver.connect()
+    driver.find_home()
+    assert driver._is_slewing is True
+
+
 def test_commands_require_connection(driver):
     with pytest.raises(TheSkyXConnectionError):
         driver.get_ra_dec()

@@ -25,6 +25,11 @@ class TheSkyXTelescope(TelescopeBase):
         "max_slew_time_sec": 300,
         "poll_interval_sec": 0.1,
         "min_altitude": -90,
+        # A Paramount loses its pointing model reference across a power cycle,
+        # so home it as part of waking up. Turn off for mounts whose driver
+        # does not implement FindHome.
+        "find_home_on_unpark": True,
+        "max_find_home_time_sec": 300,
     }
 
     def __init__(self):
@@ -304,7 +309,7 @@ class TheSkyXTelescope(TelescopeBase):
 
     @lock
     def unpark(self) -> None:
-        """Unpark the telescope."""
+        """Unpark the telescope, homing it first when configured to."""
         if self._driver is None:
             raise RuntimeError("Telescope not initialized")
 
@@ -312,6 +317,56 @@ class TheSkyXTelescope(TelescopeBase):
             self._driver.unpark()
         except TheSkyXCommandError as e:
             raise RuntimeError(f"Failed to unpark telescope: {e}")
+
+        if self["find_home_on_unpark"]:
+            self._find_home()
+
+        self.unpark_complete()
+
+    @lock
+    def find_home(self) -> None:
+        """Send the mount to its mechanical home position and wait for it."""
+        if self._driver is None:
+            raise RuntimeError("Telescope not initialized")
+
+        self._find_home()
+
+    def _find_home(self) -> None:
+        """Home the mount, blocking until it gets there.
+
+        Homing is the same kind of motion as a slew, so it is polled the same
+        way and honours abort_slew().
+        """
+        max_find_home_time_sec = float(self["max_find_home_time_sec"])
+        poll_interval_sec = float(self["poll_interval_sec"])
+
+        self._abort.clear()
+        self.log.info("Homing telescope")
+
+        try:
+            # The mount may hold the script for the whole homing run, so let
+            # the socket wait as long as the homing itself is allowed to take.
+            self._driver.find_home(timeout=max_find_home_time_sec)
+
+            start_time = time.time()
+            while self._driver.is_slewing():
+                if self._abort.is_set():
+                    self._driver.abort_slew()
+                    self.log.warning("Homing aborted")
+                    return
+
+                if time.time() - start_time > max_find_home_time_sec:
+                    self._driver.abort_slew()
+                    raise RuntimeError(
+                        f"Homing timeout: took longer than {max_find_home_time_sec}s"
+                    )
+
+                time.sleep(poll_interval_sec)
+
+        except TheSkyXCommandError as e:
+            raise RuntimeError(f"Failed to home telescope: {e}")
+
+        self.log.info("Telescope homed")
 
     def is_parked(self) -> bool:
         """Check if telescope is parked.

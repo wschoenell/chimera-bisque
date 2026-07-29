@@ -41,8 +41,21 @@ class _FakeSkyXHandler(socketserver.BaseRequestHandler):
         elif "SetTracking(0" in command:
             server.tracking = False
 
+        if "ParkAndDoNotDisconnect" in command:
+            # What the real TheSkyX answers when the mount is already parked.
+            if server.parked:
+                return (
+                    "ScriptError: TypeError: the device is parked and must be "
+                    "unparked before this operation. Error = 216."
+                )
+            server.parked = True
+        elif "Unpark" in command:
+            server.parked = False
+
         if "GetRaDec" in command:
             return "12.5 45.0"
+        if "IsParked" in command:
+            return "true" if server.parked else "false"
         if "IsTracking" in command:
             return "1" if server.tracking else "0"
         if "IsSlewComplete" in command and "SlewToRaDec" not in command:
@@ -58,10 +71,11 @@ class _FakeSkyXHandler(socketserver.BaseRequestHandler):
 def skyx_server():
     server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _FakeSkyXHandler)
     server.tracking = False
+    server.parked = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield server.server_address
+        yield server
     finally:
         server.shutdown()
         server.server_close()
@@ -69,7 +83,7 @@ def skyx_server():
 
 @pytest.fixture
 def driver(skyx_server):
-    host, port = skyx_server
+    host, port = skyx_server.server_address
     return TheSkyXDriver(logging.getLogger("test"), host=host, port=port)
 
 
@@ -121,6 +135,38 @@ def test_find_home_marks_the_mount_as_moving(driver):
     driver.connect()
     driver.find_home()
     assert driver._is_slewing is True
+
+
+def test_park_is_idempotent(driver, skyx_server):
+    """Parking an already-parked mount must succeed, not raise Error 216."""
+    driver.connect()
+    driver.park()
+
+    driver.park()
+
+    assert driver.is_parked() is True
+
+
+def test_park_survives_losing_the_race_to_another_parker(driver, skyx_server):
+    """Error 216 between the state check and the command still means parked."""
+    driver.connect()
+    # The mount parks after is_parked() has already answered "no", so the
+    # check above cannot catch it and the command hits Error 216.
+    skyx_server.parked = True
+    driver.is_parked = lambda: False
+
+    driver.park()
+
+    assert driver._is_parked is True
+
+
+def test_is_parked_reads_the_mount_not_a_cached_flag(driver, skyx_server):
+    """A mount parked before chimera started must not report itself unparked."""
+    skyx_server.parked = True
+    driver.connect()
+
+    assert driver._is_parked is False  # nothing has commanded a park
+    assert driver.is_parked() is True
 
 
 def test_commands_require_connection(driver):

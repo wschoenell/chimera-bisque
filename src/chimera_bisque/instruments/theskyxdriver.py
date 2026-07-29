@@ -377,6 +377,14 @@ class TheSkyXDriver:
         if not self._is_connected:
             raise TheSkyXConnectionError("Not connected to TheSkyX")
 
+        # Parking an already-parked mount makes TheSkyX reject the script with
+        # "the device is parked and must be unparked" (Error = 216), which
+        # propagated as a failure out of every automated park (checklist park
+        # items, stop sequences). Reaching the requested state is a success.
+        if self.is_parked():
+            self.log.info("Telescope already parked")
+            return
+
         try:
             # https://www.bisque.com/wp-content/scriptthesky/classsky6_r_a_s_c_o_m_tele.html#ad08e329bb8844fa4d0a0d59a9ce10d07
             command = """
@@ -390,8 +398,22 @@ class TheSkyXDriver:
 
         except TheSkyXConnectionError:
             raise
+        except TheSkyXCommandError as e:
+            # Lost the race with something else parking the mount between the
+            # check above and the command: still the state we asked for.
+            if self._is_already_parked_error(e):
+                self._is_parked = True
+                self.log.info("Telescope already parked")
+                return
+            raise TheSkyXCommandError(f"Failed to park telescope: {e}")
         except Exception as e:
             raise TheSkyXCommandError(f"Failed to park telescope: {e}")
+
+    @staticmethod
+    def _is_already_parked_error(error: Exception) -> bool:
+        """True for TheSkyX's "device is parked" rejection (Error = 216)."""
+        text = str(error).lower()
+        return "error = 216" in text or "must be unparked" in text
 
     def unpark(self) -> None:
         """Unpark the telescope. Happend automatically on connect"""
@@ -414,8 +436,30 @@ class TheSkyXDriver:
             raise TheSkyXCommandError(f"Failed to unpark telescope: {e}")
 
     def is_parked(self) -> bool:
-        """Check if telescope is parked"""
-        return self._is_parked
+        """Query the mount's live park state.
+
+        Asks the mount rather than trusting a cached "last commanded" flag, the
+        same way :meth:`is_tracking` does: the flag starts False on every
+        connect, so after a chimera restart a parked mount reports itself
+        unparked -- and park() would then drive straight into Error 216.
+        """
+        if not self._is_connected:
+            return self._is_parked
+
+        try:
+            command = """
+                var Out;
+                Out = sky6RASCOMTele.IsParked();
+            """
+            result = self._send_command(command)
+            # IsParked() answers with a JavaScript boolean, not the 0/1 the
+            # other queries return.
+            self._is_parked = result.strip().lower() in ("true", "1")
+            return self._is_parked
+        except (TheSkyXCommandError, ValueError) as e:
+            # e.g. a mount driver that does not implement parking at all.
+            self.log.debug(f"IsParked query failed, using cached state: {e}")
+            return self._is_parked
 
     def find_home(self, timeout: float | None = None) -> None:
         """Send the mount to its mechanical home position.

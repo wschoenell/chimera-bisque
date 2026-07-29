@@ -28,12 +28,21 @@ SITE_CONFIG = {
     "altitude": "1864",
 }
 
+# The same sky position in both epochs, offset by roughly the 2026 precession
+# so a test can tell which one a code path used.
+MOUNT_RA_DEC_NOW = (12.52, 45.15)
+MOUNT_RA_DEC_J2000 = (12.5, 45.0)
+
 
 class _FakeSkyXHandler(socketserver.BaseRequestHandler):
     """Emulate the subset of the TheSkyX scripting interface we exercise.
 
     Tracking is stateful: an RA/Dec slew turns it on (as the real TheSkyX
     does), SetTracking sets it explicitly, and IsTracking reports it back.
+
+    The mount sits at MOUNT_RA_DEC_NOW, in the epoch of date as the real
+    sky6RASCOMTele reports it; a read that precesses back to J2000 gets
+    MOUNT_RA_DEC_J2000 instead, so the tests can tell the two apart.
     """
 
     def handle(self):
@@ -57,7 +66,12 @@ class _FakeSkyXHandler(socketserver.BaseRequestHandler):
             server.tracking = True
             return "undefined"
         if "GetRaDec" in command:
-            return "12.5 45.0"
+            ra, dec = (
+                MOUNT_RA_DEC_J2000
+                if "PrecessNowTo2000" in command
+                else MOUNT_RA_DEC_NOW
+            )
+            return f"{ra} {dec}"
         if "IsTracking" in command:
             return "1" if server.tracking else "0"
         if "IsSlewComplete" in command:
@@ -185,3 +199,54 @@ def test_homing_abort_does_not_wait_out_the_poll_interval(manager, skyx_server):
     start = time.time()
     telescope.find_home()
     assert time.time() - start < 10
+
+
+def _last_script_with(server, needle):
+    matches = [script for script in server.scripts if needle in script]
+    assert matches, f"no script containing {needle!r} was sent to TheSkyX"
+    return matches[-1]
+
+
+def test_ra_dec_slew_precesses_j2000_target_to_epoch_of_date(telescope, skyx_server):
+    # SlewToRaDec takes coordinates "for the current epoch"; handing it J2000
+    # left every target 10-30' off (lna40 PENDING_ISSUES #51). TheSkyX does the
+    # conversion, so the slew must be commanded from the precessed values and
+    # not from the J2000 literals.
+    telescope.slew_to_ra_dec(12.0, -30.0)
+
+    script = _last_script_with(skyx_server, "SlewToRaDec")
+    assert "sky6Utils.Precess2000ToNow(12.0, -30.0)" in script
+    assert "SlewToRaDec(raNow, decNow" in script
+    assert "SlewToRaDec(12.0, -30.0" not in script
+
+
+def test_alt_az_slew_is_not_precessed(telescope, skyx_server):
+    # alt_az_to_ra_dec already returns epoch-of-date coordinates (it works off
+    # the local sidereal time), so precessing them again would reintroduce the
+    # very error #51 is about, pointing 20' from the requested horizon spot.
+    telescope.slew_to_alt_az(45.0, 180.0)
+
+    script = _last_script_with(skyx_server, "SlewToRaDec")
+    assert "Precess2000ToNow" not in script
+
+
+def test_position_is_reported_in_j2000(telescope, skyx_server):
+    # chimera writes this into RA/DEC under EQUINOX = 2000.0.
+    assert telescope.get_position_ra_dec() == MOUNT_RA_DEC_J2000
+    assert "PrecessNowTo2000" in _last_script_with(skyx_server, "GetRaDec")
+
+
+def test_alt_az_position_uses_epoch_of_date(telescope, skyx_server):
+    # The hour-angle conversion is only valid in the mount's own epoch, so this
+    # read must NOT be precessed back to J2000.
+    telescope.get_position_alt_az()
+    assert "PrecessNowTo2000" not in _last_script_with(skyx_server, "GetRaDec")
+
+
+def test_sync_precesses_j2000_target(telescope, skyx_server):
+    # Sync writes the mount model: an un-precessed sync bakes the error in.
+    telescope.sync_ra_dec(12.0, -30.0)
+
+    script = _last_script_with(skyx_server, "Sync")
+    assert "sky6Utils.Precess2000ToNow(12.0, -30.0)" in script
+    assert "Sync(sky6Utils.dOut0, sky6Utils.dOut1" in script

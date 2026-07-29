@@ -83,11 +83,20 @@ class TheSkyXTelescope(TelescopeBase):
             raise NotImplementedError(f"Only J2000 epoch is supported. Got: {epoch}")
 
         self._validate_ra_dec(ra, dec)
+        self._slew(ra, dec, epoch, self._driver.slew_to_ra_dec_j2000)
+
+    def _slew(self, ra: float, dec: float, epoch: float, slew_command) -> None:
+        """Issue a slew and poll it to completion.
+
+        ``slew_command`` selects the epoch the mount is commanded in: J2000
+        targets are precessed by TheSkyX, Alt/Az targets are already in the
+        epoch of date and must not be precessed again.
+        """
         self.slew_begin(ra, dec, epoch)
         self._abort.clear()
 
         try:
-            self._driver.slew_to_ra_dec(ra, dec)
+            slew_command(ra, dec)
 
             # Poll for slew completion
             start_time = time.time()
@@ -140,7 +149,11 @@ class TheSkyXTelescope(TelescopeBase):
         site = self.site()
         ra, dec = site.alt_az_to_ra_dec(alt, az)
 
-        self.slew_to_ra_dec(ra, dec)
+        # alt_az_to_ra_dec works off the local sidereal time, so its RA/Dec is
+        # already in the epoch of date -- precessing it as if it were J2000
+        # would put the mount 20' off a target that is by definition where the
+        # telescope is pointing.
+        self._slew(ra, dec, 2000, self._driver.slew_to_ra_dec)
         # An Alt/Az target is fixed to the horizon, so sidereal tracking must be
         # off. TheSkyX turns tracking on when the (RA/Dec) slew finishes, so
         # force it back off unconditionally. RA/Dec slews deliberately leave
@@ -173,7 +186,11 @@ class TheSkyXTelescope(TelescopeBase):
             return False
 
     def get_position_ra_dec(self) -> tuple[float, float]:
-        """Get current telescope RA/Dec position.
+        """Get current telescope RA/Dec position, in J2000.
+
+        chimera writes this straight into the RA/DEC header cards under
+        EQUINOX = 2000.0, so it must be J2000 and not the epoch-of-date
+        coordinates TheSkyX reports.
 
         Returns:
             (ra_hours, dec_degrees): Current position
@@ -181,7 +198,7 @@ class TheSkyXTelescope(TelescopeBase):
         if self._driver is None:
             raise RuntimeError("Telescope not initialized")
         try:
-            return self._driver.get_ra_dec()
+            return self._driver.get_ra_dec_j2000()
         except TheSkyXCommandError as e:
             raise RuntimeError(f"Failed to get position: {e}")
 
@@ -191,7 +208,14 @@ class TheSkyXTelescope(TelescopeBase):
         Returns:
             (alt_degrees, az_degrees): Current altitude and azimuth
         """
-        ra, dec = self.get_position_ra_dec()
+        if self._driver is None:
+            raise RuntimeError("Telescope not initialized")
+        # The hour-angle conversion needs coordinates in the epoch of date, so
+        # read the mount's own numbers rather than the J2000 ones.
+        try:
+            ra, dec = self._driver.get_ra_dec()
+        except TheSkyXCommandError as e:
+            raise RuntimeError(f"Failed to get position: {e}")
         site = self.site()
         alt, az = site.ra_dec_to_alt_az(ra, dec)
         return alt, az
@@ -227,7 +251,7 @@ class TheSkyXTelescope(TelescopeBase):
             raise NotImplementedError(f"Only J2000 epoch is supported. Got: {epoch}")
 
         try:
-            self._driver.sync_ra_dec(ra, dec)
+            self._driver.sync_ra_dec_j2000(ra, dec)
             self.sync_complete(ra, dec)
         except TheSkyXCommandError as e:
             raise RuntimeError(f"Sync failed: {e}")

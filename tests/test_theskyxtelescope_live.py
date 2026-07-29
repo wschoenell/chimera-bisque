@@ -18,6 +18,7 @@ Mount-moving operations (move_*, park, tracking) are further gated behind
 """
 
 import logging
+import math
 import os
 import socket
 import threading
@@ -29,6 +30,7 @@ from chimera.core.manager import Manager
 from chimera.core.site import Site
 from chimera.interfaces.telescope import TelescopeStatus
 
+from chimera_bisque.instruments.theskyxdriver import TheSkyXDriver
 from chimera_bisque.instruments.theskyxtelescope import TheSkyXTelescope
 
 _URL = os.environ.get("THESKYX_TEST_URL")
@@ -109,6 +111,53 @@ def test_position_reads_are_consistent(telescope):
 
 def test_initial_not_slewing(telescope):
     assert telescope.is_slewing() is False
+
+
+def test_reported_position_is_j2000_not_epoch_of_date(telescope):
+    """The check that #51 needed: the instrument reports J2000 while the mount
+    reports the epoch of date, so the two reads must differ by exactly the
+    precession an independent library predicts (~20' in 2026).
+
+    A driver that skips the conversion passes every other live test here --
+    both directions carried the same error, so the readback reproduced the
+    target to sub-arcsecond while the telescope sat 20' away.
+    """
+    ephem = pytest.importorskip("ephem")
+
+    # a driver of our own: the instrument is proxied over the bus, so its
+    # private driver is not reachable from here
+    host, _, port = _URL.partition(":")
+    driver = TheSkyXDriver(
+        logging.getLogger("epoch-check"), host=host, port=int(port or 3040)
+    )
+    driver.connect()
+
+    ra_j2000, dec_j2000 = telescope.get_position_ra_dec()
+    ra_now, dec_now = driver.get_ra_dec()
+
+    expected = ephem.Equatorial(
+        ephem.Equatorial(
+            ra_j2000 * math.pi / 12, math.radians(dec_j2000), epoch=ephem.J2000
+        ),
+        epoch=ephem.now(),
+    )
+    # pyephem precesses only; TheSkyX also carries nutation and aberration,
+    # worth ~20" between them (measured on opd-40 2026-07-29). The term being
+    # checked here is 60x larger, so a loose tolerance still catches a missing
+    # or inverted conversion.
+    sep_arcsec = (
+        math.hypot(
+            (ra_now - expected.ra * 12 / math.pi)
+            * 15
+            * math.cos(math.radians(dec_now)),
+            dec_now - math.degrees(expected.dec),
+        )
+        * 3600
+    )
+    assert sep_arcsec < 60, (
+        f'epoch-of-date readback is {sep_arcsec:.0f}" from the precessed J2000 '
+        f"position - the epoch conversion looks wrong"
+    )
 
 
 def test_slew_fires_events_and_arrives(telescope):

@@ -53,7 +53,8 @@ class _FakeSkyXHandler(socketserver.BaseRequestHandler):
             server.parked = False
 
         if "GetRaDec" in command:
-            return "12.5 45.0"
+            # the mount reports the epoch of date; precessing back gives J2000
+            return "12.5 45.0" if "PrecessNowTo2000" in command else "12.52 45.15"
         if "IsParked" in command:
             return "true" if server.parked else "false"
         if "IsTracking" in command:
@@ -97,8 +98,15 @@ def test_connect_and_disconnect(driver):
 def test_get_ra_dec(driver):
     driver.connect()
     ra, dec = driver.get_ra_dec()
-    assert ra == 12.5
-    assert dec == 45.0
+    # the raw read is the mount's own epoch of date
+    assert (ra, dec) == (12.52, 45.15)
+
+
+def test_get_ra_dec_j2000(driver):
+    driver.connect()
+    # one round trip: the precession rides along in the same script, because
+    # this read is polled
+    assert driver.get_ra_dec_j2000() == (12.5, 45.0)
 
 
 def test_slew_and_completion(driver):
@@ -108,9 +116,16 @@ def test_slew_and_completion(driver):
     assert driver.is_slewing() is False
 
 
+def test_slew_j2000_marks_the_mount_as_moving(driver):
+    driver.connect()
+    driver.slew_to_ra_dec_j2000(10.0, 20.0)
+    assert driver._is_slewing is True
+
+
 def test_sync_and_tracking(driver):
     driver.connect()
     driver.sync_ra_dec(1.0, 2.0)  # should not raise
+    driver.sync_ra_dec_j2000(1.0, 2.0)  # should not raise
     driver.start_tracking()
     assert driver.is_tracking() is True
     driver.stop_tracking()

@@ -14,6 +14,7 @@ turns sidereal tracking ON by itself when an RA/Dec slew finishes. That means
 
 import socketserver
 import threading
+import time
 
 import pytest
 from chimera.core.site import Site
@@ -60,7 +61,7 @@ class _FakeSkyXHandler(socketserver.BaseRequestHandler):
         if "IsTracking" in command:
             return "1" if server.tracking else "0"
         if "IsSlewComplete" in command:
-            return "1"  # slew complete
+            return "1" if server.slew_complete else "0"
         if "IsConnected" in command and "Disconnect" in command:
             return "0"
         if "IsConnected" in command:
@@ -73,6 +74,7 @@ def skyx_server():
     server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _FakeSkyXHandler)
     server.scripts = []
     server.tracking = False
+    server.slew_complete = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -137,3 +139,49 @@ def test_stop_tracking_reflected_by_is_tracking(telescope, skyx_server):
     assert telescope.is_tracking() is True
     telescope.stop_tracking()
     assert telescope.is_tracking() is False
+
+
+def test_unpark_homes_the_mount(telescope, skyx_server):
+    # A Paramount coming out of park has no valid pointing reference until it
+    # has found home, so waking it up must include the homing run.
+    telescope.unpark()
+    assert any("FindHome" in script for script in skyx_server.scripts)
+
+
+def test_unpark_can_skip_homing(manager, skyx_server):
+    host, port = skyx_server.server_address
+    telescope = manager.add_class(
+        TheSkyXTelescope,
+        "skyx-nohome",
+        config={
+            "skyx_host": host,
+            "skyx_port": port,
+            "poll_interval_sec": 0.01,
+            "find_home_on_unpark": False,
+        },
+    )
+    telescope.unpark()
+    assert not any("FindHome" in script for script in skyx_server.scripts)
+
+
+def test_find_home_can_be_called_directly(telescope, skyx_server):
+    telescope.find_home()
+    assert any("FindHome" in script for script in skyx_server.scripts)
+
+
+def test_homing_abort_does_not_wait_out_the_poll_interval(manager, skyx_server):
+    # The poll blocks on the abort event, so abort_slew() lands at once. With
+    # a time.sleep() in the loop it would only be seen a whole tick later --
+    # 30 s here (astroufsc/chimera#255 hit the same thing in the scheduler).
+    skyx_server.slew_complete = False  # homing never finishes on its own
+    host, port = skyx_server.server_address
+    telescope = manager.add_class(
+        TheSkyXTelescope,
+        "skyx-abort",
+        config={"skyx_host": host, "skyx_port": port, "poll_interval_sec": 30},
+    )
+    threading.Timer(0.2, telescope.abort_slew).start()
+
+    start = time.time()
+    telescope.find_home()
+    assert time.time() - start < 10

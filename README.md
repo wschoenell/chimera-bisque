@@ -28,6 +28,8 @@ instruments:
       type: TheSkyXTelescope
       skyx_host: localhost
       skyx_port: 3040
+      find_home_on_unpark: True   # run FindHome when the mount is unparked
+      max_find_home_time_sec: 300
 
     # TheSky 5/6 via Windows COM (requires Windows + the `windows` extra)
     - name: telescope
@@ -38,7 +40,10 @@ instruments:
 The plugin ships two connection modes:
 
 - **`TheSkyXTelescope`** talks to TheSkyX over its TCP/IP JavaScript scripting
-  interface. It is pure Python and works on any platform.
+  interface. It is pure Python and works on any platform. `unpark()` homes the
+  mount (TheSkyX `FindHome`) and waits for it to arrive before returning; set
+  `find_home_on_unpark: False` for mounts whose driver has no homing routine.
+  Homing can also be triggered on its own with `find_home()`.
 - **`TheSkyTelescope`** drives TheSky 5/6 through Windows COM automation. It
   only works on Windows with the optional `windows` extra installed
   (`uv sync --extra windows`, which pulls in `pywin32`). The plugin still

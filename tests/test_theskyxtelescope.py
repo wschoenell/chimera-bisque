@@ -15,18 +15,11 @@ turns sidereal tracking ON by itself when an RA/Dec slew finishes. That means
 import socketserver
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
-from chimera.core.site import Site
 
 from chimera_bisque.instruments.theskyxtelescope import TheSkyXTelescope
-
-SITE_CONFIG = {
-    "name": "LNA",
-    "latitude": "-22 32 03",
-    "longitude": "-45 34 57",
-    "altitude": "1864",
-}
 
 # The same sky position in both epochs, offset by roughly the 2026 precession
 # so a test can tell which one a code path used.
@@ -101,7 +94,6 @@ def skyx_server():
 @pytest.fixture
 def telescope(manager, skyx_server):
     host, port = skyx_server.server_address
-    manager.add_class(Site, "lna", config=SITE_CONFIG)
     yield manager.add_class(
         TheSkyXTelescope,
         "skyx",
@@ -252,27 +244,16 @@ def test_sync_precesses_j2000_target(telescope, skyx_server):
     assert "Sync(sky6Utils.dOut0, sky6Utils.dOut1" in script
 
 
-def test_get_site_shim_works_on_cores_from_both_sides_of_271():
+def test_alt_az_conversions_use_the_injected_site():
     """astroufsc/chimera#271 replaced TelescopeBase.site() with the
-    manager-injected ChimeraObject.get_site(). Deploying that core broke
-    every alt/az conversion on opd-40 (2026-07-28: `AttributeError:
-    'TheSkyXTelescope' object has no attribute 'site'` out of get_az, which
-    the dome lookup calls). The driver must run on either core."""
-    from chimera_bisque.instruments.theskyxtelescope import TheSkyXTelescope
+    manager-injected ChimeraObject.get_site(). Deploying that core broke every
+    alt/az conversion on opd-40 (2026-07-28: `AttributeError:
+    'TheSkyXTelescope' object has no attribute 'site'` out of get_az, which the
+    dome lookup calls on every cycle)."""
+    telescope = TheSkyXTelescope.__new__(TheSkyXTelescope)
+    telescope.get_site = lambda: SimpleNamespace(
+        ra_dec_to_alt_az=lambda ra, dec: (60.0, 120.0)
+    )
+    telescope._driver = SimpleNamespace(get_ra_dec=lambda: (12.0, -30.0))
 
-    class NewCore(TheSkyXTelescope):
-        def __init__(self):
-            pass
-
-        def get_site(self):
-            return "injected-site"
-
-    class OldCore(TheSkyXTelescope):
-        def __init__(self):
-            pass
-
-        def site(self):
-            return "proxy-site"
-
-    assert TheSkyXTelescope._get_site(NewCore()) == "injected-site"
-    assert TheSkyXTelescope._get_site(OldCore()) == "proxy-site"
+    assert telescope.get_position_alt_az() == (60.0, 120.0)

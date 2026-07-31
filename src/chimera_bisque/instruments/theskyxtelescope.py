@@ -130,18 +130,6 @@ class TheSkyXTelescope(TelescopeBase):
             self.slew_complete(ra, dec, TelescopeStatus.ERROR)
             raise RuntimeError(f"Slew failed: {e}")
 
-    def _get_site(self):
-        """The site object, whichever accessor this core provides.
-
-        astroufsc/chimera#271 replaced ``TelescopeBase.site()`` with the
-        manager-injected ``ChimeraObject.get_site()``. Support both so the
-        driver runs on cores from either side of that change.
-        """
-        get_site = getattr(self, "get_site", None)
-        if get_site is not None:
-            return get_site()
-        return self.site()
-
     @lock
     def slew_to_alt_az(self, alt: float, az: float) -> None:
         """Slew telescope to target Alt/Az coordinates.
@@ -158,7 +146,7 @@ class TheSkyXTelescope(TelescopeBase):
         """
         self._validate_alt_az(alt, az)
 
-        site = self._get_site()
+        site = self.get_site()
         ra, dec = site.alt_az_to_ra_dec(alt, az)
 
         # alt_az_to_ra_dec works off the local sidereal time, so its RA/Dec is
@@ -228,7 +216,7 @@ class TheSkyXTelescope(TelescopeBase):
             ra, dec = self._driver.get_ra_dec()
         except TheSkyXCommandError as e:
             raise RuntimeError(f"Failed to get position: {e}")
-        site = self._get_site()
+        site = self.get_site()
         alt, az = site.ra_dec_to_alt_az(ra, dec)
         return alt, az
 
